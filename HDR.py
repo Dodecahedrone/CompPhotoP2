@@ -27,7 +27,7 @@ for i in range(0,16):
 
 
 
-'''
+
 def uniform_weight(x):
     if z_min <= x <= z_max:
         return 1
@@ -83,7 +83,7 @@ final_image = np.stack(final_channels_np, axis=-1)
 
 plt.imshow(final_image)
 plt.show()
-'''
+
 
 
 
@@ -96,7 +96,7 @@ uniform_weight_vectorized(raw_images)
 '''
 
 '''
-# merge HDR
+# merge HDR old
 for i in range(0,4016): #for each pixel
     for j in range(0,6016): #for each pixel
         for k in range(0,16): #for each image
