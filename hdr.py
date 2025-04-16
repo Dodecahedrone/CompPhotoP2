@@ -174,8 +174,8 @@ def gamma_srgb(img_linear):
 
 
 
-K_values = np.linspace(0.15, 2.0, 5)  # create arrays of k and b to iterate over
-B_values = np.linspace(0.95, 5.0, 5) 
+K_values = [0.01,0.05,0.15,0.5,1] # create arrays of k and b to iterate over
+B_values = [0.01,0.05,0.1,0.5,1] 
 
 # iterate k and b over the gaussian weight
 
