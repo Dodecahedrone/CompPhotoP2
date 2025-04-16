@@ -12,6 +12,7 @@ import numpy as np
 import cv2
 import exifread
 from PIL import Image
+import os
 
 from functools import reduce
 import matplotlib.pyplot as plt
@@ -47,9 +48,8 @@ z_min = 0.05
 z_max = 0.95
 
 # crop values for smaller images during debugging
-crop_x = 2000
-crop_y = 1333
-crop = True
+crop_x = 6016
+crop_y = 4016
 
 #load each image and exposure info into respective arrays
 for i in range(0,16):
@@ -65,51 +65,13 @@ for i in range(0,16):
 
 raw_images_cropped = raw_images[:,:crop_y,:crop_x,:]
 
-# define weighting functions
-# photon weight uses gaussian weight but multiplied by exposure
-def uniform_weight(x):
-    if z_min <= x <= z_max:
-        return float(1)
-    else:
-        return float(0)
-
-def tent_weight(x):
-    if z_min <= x <= z_max:
-        return float(np.minimum(x, 1-x))
-    else:
-        return float(0)
-
-def gaussian_weight(x):
-    if z_min <= x <= z_max:
-        return float(np.exp(-4 * ((x - 0.5) ** 2) / 0.25))
-    else:
-        return float(0)
-
-# vectorize functions
-uniform_weight_vectorized = np.vectorize(uniform_weight)
-tent_weight_vectorized = np.vectorize(tent_weight)
-gaussian_weight_vectorized = np.vectorize(gaussian_weight)
-
-# create list of functions to use and final HDR images
-functions = [uniform_weight_vectorized, tent_weight_vectorized, gaussian_weight_vectorized, uniform_weight_vectorized]
 #HDR_images = np.zeros((4, 4016, 6016, 3), dtype=np.float32)
-if(crop):
-    HDR_images = np.zeros((4, crop_y, crop_x, 3), dtype=np.float32)
-else:
-    HDR_images = np.zeros((4, 4016, 6016, 3), dtype=np.float32)
-
-
+HDR_images = np.zeros((4, crop_y, crop_x, 3), dtype=np.float32)
 
 #empty color channels
-if(crop):
-    red = raw_images_cropped[:,:,:,0]
-    green = raw_images_cropped[:,:,:,1]
-    blue = raw_images_cropped[:,:,:,2]
-else:
-    red = raw_images[:,:,:,0]
-    green = raw_images[:,:,:,1]
-    blue = raw_images[:,:,:,2]
-
+red = raw_images_cropped[:,:,:,0]
+green = raw_images_cropped[:,:,:,1]
+blue = raw_images_cropped[:,:,:,2]
 
 channels = [red, green, blue]
 
@@ -120,36 +82,45 @@ for f in range(0,4):
 
     # loop for 3 color channels
     for channel in channels:
-        #get the weights of the image
-        weighted = functions[f](channel)
+
+        # create a mask for noisy and clipped values
+        mask = np.ones(channel.shape)
+        mask[channel > z_max] = 0.0
+        mask[channel < z_min] = 0.0
+
+        weighted = np.empty(channel.shape)
+
+        # apply the appropriate weighting function
+        if f == 0:
+            weighted = mask
+        elif f == 1:
+            tent = (-1 * np.abs(channel - 0.5)) + 0.5
+            weighted = mask * tent
+        elif f == 2:
+            gaussian = np.exp(-4 * ((channel - 0.5) ** 2) / 0.25)
+            weighted = mask * gaussian
+        elif f == 3:
+            weighted = mask
+            weighted *= exposures[:, None, None]
 
         print("weights applied")
-        print(type(weighted[0][0][0]))
-
-        if f == 3:
-            weighted *= exposures[:, None, None]
-            print("photon weight applied")
 
         #remove noisy and clipped values by multiplying channel and weights
         multiply =  channel * weighted
         print("multiply complete")
-        print(type(multiply[0][0][0]))
 
         #divide by the respective exposure time
         multiply /= exposures[:, None, None]
-        print(type(exposures[0]))
         print("exposure complete")
 
         #sum weights to get denominator
         #summed = reduce(lambda x, y: x + y, weighted)
         denominator = np.sum(weighted, axis=0) + 1e-8
         print("weights summed")
-        print(type(denominator[0][0]))
 
         #sum channel to get numerator
         #channel_summed = reduce(lambda x, y: x + y, multiply)
         numerator = np.sum(multiply, axis=0)
-        print(type(numerator[0][0]))
         print("channel summed")
 
         #compute average
@@ -174,19 +145,20 @@ for f in range(0,4):
 
  # parts 3 and 4
 
-def reinhard_tonemap(hdr, K=0.15, B=0.95, eps=1e-6):
+def reinhard_tonemap(hdr, K=0.15, B=0.95, epsilon=1e-6): # impliment formula
     
-    luminance = np.mean(hdr, axis=2) + eps
-    log_lum = np.log(luminance)
-    avg_log_lum = np.exp(np.mean(log_lum))
+    luminance = np.mean(hdr, axis=2) + epsilon
+    log_luminance = np.log(luminance)
+    N = np.prod(luminance.shape)
+    avg_log_luminance = np.exp(np.sum(log_luminance) / N)
     
-    scaled_hdr = (K / avg_log_lum) * hdr
+    scaled_hdr = (K / avg_log_luminance) * hdr
     max_val = np.max(scaled_hdr)
     I_white = B * max_val
     
-    numerator = scaled_hdr * (1.0 + (scaled_hdr / (I_white**2 + eps)))
+    numerator = scaled_hdr * (1.0 + (scaled_hdr / (I_white**2 + epsilon)))
     denominator = 1.0 + scaled_hdr
-    tone_mapped = numerator / (denominator + eps)
+    tone_mapped = numerator / (denominator + epsilon)
     
     
     tone_mapped = np.clip(tone_mapped, 0.0, 1.0)
@@ -205,39 +177,96 @@ def gamma_srgb(img_linear):
 K_values = np.linspace(0.15, 2.0, 5)  # create arrays of k and b to iterate over
 B_values = np.linspace(0.95, 5.0, 5) 
 
-# iterate k and b over all weights
-for idx in range(4):
-    hdr_img = HDR_images[idx]  
+# iterate k and b over the gaussian weight
+
+hdr_img = HDR_images[2]  
     
     # display and save both results with and without gamma correction
-    for K_val in K_values:
-        for B_val in B_values:
+for K_val in K_values:
+    for B_val in B_values:
             
             
-            tm_img = reinhard_tonemap(hdr_img, K=K_val, B=B_val)
+        tonemapped_img = reinhard_tonemap(hdr_img, K=K_val, B=B_val)
             
             
-            tm_img_gamma = gamma_srgb(tm_img)
-            tm_img_gamma = np.clip(tm_img_gamma, 0.0, 1.0)
+        tonemapped_img_gamma = gamma_srgb(tonemapped_img)
+        tonemapped_img_gamma = np.clip(tonemapped_img_gamma, 0.0, 1.0)
             
             
-            plt.figure()
-            plt.title(f"Weight {idx}, Tone-Mapped Only (K={K_val:.2f}, B={B_val:.2f})")
-            plt.imshow(tm_img)
-            plt.show()
+        plt.figure()
+        plt.title(f"Gaussian, Tone-Mapped Only (K={K_val:.2f}, B={B_val:.2f})")
+        plt.imshow(tonemapped_img)
+        plt.show()
             
             
-            plt.figure()
-            plt.title(f"Weight {idx}, Tone-Mapped + Gamma (K={K_val:.2f}, B={B_val:.2f})")
-            plt.imshow(tm_img_gamma)
-            plt.show()
+        plt.figure()
+        plt.title(f"Gaussian, Tone-Mapped + Gamma (K={K_val:.2f}, B={B_val:.2f})")
+        plt.imshow(tonemapped_img_gamma)
+        plt.show()
             
             
-            out_name_nogamma = f"hdr_weight{idx}_K{K_val:.2f}_B{B_val:.2f}_nogamma.png"
-            writeHDR(out_name_nogamma, tm_img)
+        out_name_nogamma = f"Gaussian_K{K_val:.2f}_B{B_val:.2f}_nogamma.png"
+        writeHDR(out_name_nogamma, tonemapped_img)
             
             
-            out_name_gamma = f"hdr_weight{idx}_K{K_val:.2f}_B{B_val:.2f}_gamma.png"
-            writeHDR(out_name_gamma, tm_img_gamma)
+        out_name_gamma = f"Gaussian_K{K_val:.2f}_B{B_val:.2f}_gamma.png"
+        writeHDR(out_name_gamma, tonemapped_img_gamma)
 
-            print("Saved:", out_name_nogamma, "and", out_name_gamma)
+        print("Saved:", out_name_nogamma, "and", out_name_gamma)
+
+
+# part 5
+
+hdr_img = HDR_images[2]  # pick second weight and the k and b value recommended in the pdf
+
+tonemapped_img = reinhard_tonemap(hdr_img, K=0.15, B=0.95)
+
+
+tonemapped_img_gamma = gamma_srgb(tonemapped_img)
+tonemapped_img_gamma = np.clip(tonemapped_img_gamma, 0.0, 1.0)
+
+selected_img = tonemapped_img_gamma  
+
+
+png_filename = "final_output.png"
+writeHDR(png_filename, selected_img)  
+print(f"Saved lossless PNG: {png_filename}")
+
+
+png_size = os.path.getsize(png_filename)
+print(f"PNG file size: {png_size} bytes")
+
+
+ldr_8bit = (selected_img * 255).astype(np.uint8) # convert to bgr for opencv
+ldr_bgr = ldr_8bit[..., ::-1]  
+
+
+qualities = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10] # jpeg qualities to sweep through and compare to the png
+
+
+for Q in qualities:
+    
+    jpeg_filename = f"final_output_Q{Q}.jpg"
+    cv2.imwrite(jpeg_filename, ldr_bgr, [cv2.IMWRITE_JPEG_QUALITY, Q])
+    
+    
+    jpeg_size = os.path.getsize(jpeg_filename)
+    
+    
+    if jpeg_size > 0:
+        compression_ratio = png_size / jpeg_size
+    else:
+        compression_ratio = 0 # make sure we dont divide by 0 incase image is empty
+    
+    
+    print(f"  Quality = {Q:3d},  JPEG Size = {jpeg_size:6d} bytes,  "
+          f"Compression Ratio = {compression_ratio:.2f}")
+    
+    
+    jpeg_img_bgr = cv2.imread(jpeg_filename, cv2.IMREAD_UNCHANGED)
+    jpeg_img_rgb = jpeg_img_bgr[..., ::-1]
+    plt.figure()
+    plt.title(f"JPEG Quality {Q}")
+    plt.imshow(jpeg_img_rgb)
+    plt.axis('off')
+    plt.show()
